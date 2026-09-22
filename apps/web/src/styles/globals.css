@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --gt-green: #1db954;
+  --gt-charcoal: #121212;
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: radial-gradient(1200px 600px at 20% -10%, #1a3d28 0%, transparent 55%),
+    radial-gradient(900px 500px at 90% 0%, #1f2a22 0%, transparent 50%),
+    var(--gt-charcoal);
+  color: #fff;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #333 transparent;
+}
+
+@layer utilities {
+  .gt-section-label {
+    @apply text-xs font-semibold tracking-[0.14em] text-gt-muted uppercase;
+  }
+}
