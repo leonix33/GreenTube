@@ -1,7 +1,32 @@
 "use client";
 
-import { DEMO_TRACKS, type Track } from "@/lib/types";
+import { useEffect, useState } from "react";
+import { apiGet } from "@/lib/api";
+import type { Track } from "@/lib/types";
 import { usePlayback } from "@/lib/playback";
+
+type HomeItem = {
+  id: string;
+  title: string;
+  artist: string;
+  album?: string | null;
+  duration_ms: number;
+};
+
+type HomeResponse = {
+  sections: { id: string; title: string; items: HomeItem[] }[];
+  source: string;
+};
+
+function toTrack(item: HomeItem): Track {
+  return {
+    id: item.id,
+    title: item.title,
+    artist: item.artist,
+    album: item.album ?? undefined,
+    durationMs: item.duration_ms,
+  };
+}
 
 function AlbumCard({
   track,
@@ -45,6 +70,28 @@ function MixCard({ title, subtitle }: { title: string; subtitle: string }) {
 
 export function HomeFeed() {
   const { playTrack } = usePlayback();
+  const [tracks, setTracks] = useState<Track[]>([]);
+  const [source, setSource] = useState<string>("loading");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiGet<HomeResponse>("/api/home")
+      .then((data) => {
+        if (cancelled) return;
+        const quick =
+          data.sections.find((s) => s.id === "quick_picks")?.items ?? [];
+        setTracks(quick.map(toTrack));
+        setSource(data.source);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setError(err.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const hour = new Date().getHours();
   const greeting =
     hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
@@ -56,31 +103,40 @@ export function HomeFeed() {
           {greeting}
         </h1>
         <p className="mt-1 text-sm text-gt-muted">
-          Your mixes, made from listening signals — not a clone of anyone&apos;s catalog.
+          Open/demo catalog via provider adapters
+          {source !== "loading" ? ` · ${source}` : ""}.
         </p>
+        {error ? (
+          <p className="mt-2 text-sm text-red-400">
+            API unreachable ({error}). Start the API on :8000.
+          </p>
+        ) : null}
       </div>
 
       <section>
         <p className="gt-section-label mb-3">Quick picks</p>
         <div className="flex gap-4 overflow-x-auto pb-2">
-          {DEMO_TRACKS.map((t) => (
+          {tracks.map((t) => (
             <AlbumCard
               key={t.id}
               track={t}
-              onPlay={() => playTrack(t, DEMO_TRACKS)}
+              onPlay={() => playTrack(t, tracks)}
             />
           ))}
+          {!error && tracks.length === 0 ? (
+            <p className="text-sm text-gt-muted">Loading catalog…</p>
+          ) : null}
         </div>
       </section>
 
       <section>
         <p className="gt-section-label mb-3">Listen again</p>
         <div className="flex gap-4 overflow-x-auto pb-2">
-          {[...DEMO_TRACKS].reverse().map((t) => (
+          {[...tracks].reverse().map((t) => (
             <AlbumCard
               key={`again-${t.id}`}
               track={t}
-              onPlay={() => playTrack(t, DEMO_TRACKS)}
+              onPlay={() => playTrack(t, tracks)}
             />
           ))}
         </div>

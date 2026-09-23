@@ -1,0 +1,27 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: greentube-postgres
+    environment:
+      POSTGRES_USER: greentube
+      POSTGRES_PASSWORD: greentube
+      POSTGRES_DB: greentube
+    ports:
+      - "5432:5432"
+    volumes:
+      - greentube_pg:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U greentube -d greentube"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: greentube-redis
+    ports:
+      - "6379:6379"
+
+volumes:
+  greentube_pg:

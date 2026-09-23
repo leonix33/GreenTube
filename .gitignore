@@ -34,6 +34,8 @@ build/
 *.sqlite
 uploads/
 .tmp/
+services/api/static/audio/*.wav
+!services/api/static/audio/.gitkeep
 .coverage
 htmlcov/
 
