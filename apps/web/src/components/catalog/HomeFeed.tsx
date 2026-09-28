@@ -74,11 +74,14 @@ export function HomeFeed() {
   const [source, setSource] = useState<string>("loading");
   const [error, setError] = useState<string | null>(null);
 
+  const [sections, setSections] = useState<HomeResponse["sections"]>([]);
+
   useEffect(() => {
     let cancelled = false;
     apiGet<HomeResponse>("/api/home")
       .then((data) => {
         if (cancelled) return;
+        setSections(data.sections);
         const quick =
           data.sections.find((s) => s.id === "quick_picks")?.items ?? [];
         setTracks(quick.map(toTrack));
@@ -103,8 +106,11 @@ export function HomeFeed() {
           {greeting}
         </h1>
         <p className="mt-1 text-sm text-gt-muted">
-          Open/demo catalog via provider adapters
-          {source !== "loading" ? ` · ${source}` : ""}.
+          {source === "loading"
+            ? "Loading catalog…"
+            : source === "mongodb"
+              ? "Streaming from your GreenTube catalog."
+              : "Offline demo catalog — connect MongoDB for full library sync."}
         </p>
         {error ? (
           <p className="mt-2 text-sm text-red-400">
@@ -112,6 +118,26 @@ export function HomeFeed() {
           </p>
         ) : null}
       </div>
+
+      {sections
+        .filter((s) => s.id === "featured_stars")
+        .map((section) => {
+          const sectionTracks = section.items.map(toTrack);
+          return (
+            <section key={section.id}>
+              <p className="gt-section-label mb-3">{section.title}</p>
+              <div className="flex gap-4 overflow-x-auto pb-2">
+                {sectionTracks.map((t) => (
+                  <AlbumCard
+                    key={`${section.id}-${t.id}`}
+                    track={t}
+                    onPlay={() => playTrack(t, sectionTracks)}
+                  />
+                ))}
+              </div>
+            </section>
+          );
+        })}
 
       <section>
         <p className="gt-section-label mb-3">Quick picks</p>
@@ -129,28 +155,61 @@ export function HomeFeed() {
         </div>
       </section>
 
-      <section>
-        <p className="gt-section-label mb-3">Listen again</p>
-        <div className="flex gap-4 overflow-x-auto pb-2">
-          {[...tracks].reverse().map((t) => (
-            <AlbumCard
-              key={`again-${t.id}`}
-              track={t}
-              onPlay={() => playTrack(t, tracks)}
-            />
-          ))}
-        </div>
-      </section>
+      {sections
+        .filter((s) => s.id.startsWith("genre_"))
+        .map((section) => {
+          const sectionTracks = section.items.map(toTrack);
+          return (
+            <section key={section.id}>
+              <p className="gt-section-label mb-3">{section.title}</p>
+              <div className="flex gap-4 overflow-x-auto pb-2">
+                {sectionTracks.map((t) => (
+                  <AlbumCard
+                    key={`${section.id}-${t.id}`}
+                    track={t}
+                    onPlay={() => playTrack(t, sectionTracks)}
+                  />
+                ))}
+              </div>
+            </section>
+          );
+        })}
 
-      <section>
-        <p className="gt-section-label mb-3">Made for you</p>
-        <div className="flex gap-4 overflow-x-auto pb-2">
-          <MixCard title="My Mix 1" subtitle="Afrobeats · electronic · evening" />
-          <MixCard title="My Mix 2" subtitle="Focus · instrumental" />
-          <MixCard title="Discover Mix" subtitle="New artists matched to your taste" />
-          <MixCard title="New Release Mix" subtitle="Fresh drops in your lanes" />
-        </div>
-      </section>
+      {sections
+        .filter((s) => s.id === "listen_again" || s.id === "made_for_you")
+        .map((section) => {
+          const sectionTracks = section.items.map(toTrack);
+          if (section.id === "made_for_you") {
+            return (
+              <section key={section.id}>
+                <p className="gt-section-label mb-3">{section.title}</p>
+                <div className="flex gap-4 overflow-x-auto pb-2">
+                  {sectionTracks.map((t) => (
+                    <MixCard
+                      key={t.id}
+                      title={t.title}
+                      subtitle={`${t.artist} · ${t.album ?? "Single"}`}
+                    />
+                  ))}
+                </div>
+              </section>
+            );
+          }
+          return (
+            <section key={section.id}>
+              <p className="gt-section-label mb-3">{section.title}</p>
+              <div className="flex gap-4 overflow-x-auto pb-2">
+                {sectionTracks.map((t) => (
+                  <AlbumCard
+                    key={`${section.id}-${t.id}`}
+                    track={t}
+                    onPlay={() => playTrack(t, sectionTracks)}
+                  />
+                ))}
+              </div>
+            </section>
+          );
+        })}
     </div>
   );
 }

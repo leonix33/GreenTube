@@ -18,6 +18,10 @@ export const metadata: Metadata = {
   description:
     "Independent music streaming with owned recommendations and legitimate audio providers.",
   manifest: "/manifest.json",
+  icons: {
+    icon: [{ url: "/logo.jpg", type: "image/jpeg" }],
+    apple: [{ url: "/apple-touch-icon.jpg", type: "image/jpeg" }],
+  },
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",

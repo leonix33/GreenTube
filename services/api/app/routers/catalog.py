@@ -1,15 +1,24 @@
 from typing import Optional
+from urllib.parse import urlparse
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 
-from app.catalog_seed import SEED_TRACKS, ensure_demo_audio, track_by_id
-from app.db.session import try_db
-from app.models.db import Album, Artist, Track, TrackProvider
+from app.catalog.liked_music_seed import PLAYLIST_DESCRIPTION as LIKED_DESC
+from app.catalog.liked_music_seed import PLAYLIST_ID as LIKED_SLUG
+from app.catalog.liked_music_seed import PLAYLIST_TITLE as LIKED_TITLE
+from app.catalog.playback_resolve import resolve_playback_stream
+from app.catalog.service import CatalogService, mongo_track_to_track_out, seed_track_to_track_out
+from app.catalog_seed import ensure_demo_audio, track_by_id as seed_track_by_id
+from app.database.client import get_catalog_db
+from app.database.repositories.albums import AlbumRepository
+from app.database.repositories.artists import ArtistRepository
+from app.database.repositories.tracks import TrackRepository, track_id_str
 
 router = APIRouter(tags=["catalog"])
+catalog = CatalogService()
 
 
 class TrackOut(BaseModel):
@@ -22,9 +31,9 @@ class TrackOut(BaseModel):
     isrc: Optional[str] = None
     genres: Optional[list[str]] = None
     providers: list[str] = []
-
-    class Config:
-        from_attributes = True
+    playable: bool = True
+    preview_only: bool = False
+    spotify_uri: Optional[str] = None
 
 
 class HomeItem(BaseModel):
@@ -46,10 +55,30 @@ class HomeResponse(BaseModel):
     source: str
 
 
+class GenreOut(BaseModel):
+    slug: str
+    name: str
+    track_count: int
+
+
+class GenreListResponse(BaseModel):
+    genres: list[GenreOut]
+    source: str
+
+
+class GenreTracksResponse(BaseModel):
+    slug: str
+    name: str
+    tracks: list[TrackOut]
+    source: str
+
+
 class SearchResponse(BaseModel):
     tracks: list[TrackOut]
     artists: list[dict]
     albums: list[dict]
+    genres: list[dict] = []
+    source: str
 
 
 class StreamResponse(BaseModel):
@@ -60,164 +89,501 @@ class StreamResponse(BaseModel):
     message: str
 
 
-def _seed_track_out(t) -> TrackOut:
+def _track_out(data: dict) -> TrackOut:
     return TrackOut(
-        id=t.id,
-        title=t.title,
-        artist=t.artist,
-        album=t.album,
-        duration_ms=t.duration_ms,
-        genres=t.genres,
-        providers=[t.provider],
+        id=data["id"],
+        title=data["title"],
+        artist=data.get("artist") or "",
+        album=data.get("album"),
+        duration_ms=data["duration_ms"],
+        artwork_url=data.get("artwork_url"),
+        isrc=data.get("isrc"),
+        genres=data.get("genres"),
+        providers=data.get("providers") or [],
+        playable=bool(data.get("playable", True)),
+        preview_only=bool(data.get("preview_only", False)),
+        spotify_uri=data.get("spotify_uri"),
     )
 
 
-def _absolute(request: Request, path: Optional[str]) -> Optional[str]:
-    if not path:
+@router.get("/genres", response_model=GenreListResponse)
+async def list_genres():
+    ensure_demo_audio()
+    genres = await catalog.list_genres()
+    return GenreListResponse(
+        genres=[GenreOut(**g) for g in genres],
+        source=catalog.source,
+    )
+
+
+@router.get("/genres/{slug}/tracks", response_model=GenreTracksResponse)
+async def genre_tracks(slug: str):
+    ensure_demo_audio()
+    genres = await catalog.list_genres()
+    name = next((g["name"] for g in genres if g["slug"] == slug.lower()), slug.replace("-", " ").title())
+    tracks = await catalog.genre_tracks(slug.lower(), public_only=True)
+    return GenreTracksResponse(
+        slug=slug.lower(),
+        name=name,
+        tracks=[_track_out(t) for t in tracks if t.get("playable", True)],
+        source=catalog.source,
+    )
+
+
+class PlaylistOut(BaseModel):
+    id: str
+    title: str
+    description: str
+    track_count: int
+    tracks: list[TrackOut]
+
+
+async def _playlist_from_mongo(
+    request: Request,
+    *,
+    slug: str,
+    title: str,
+    description: str,
+) -> PlaylistOut | None:
+    db = get_catalog_db()
+    if db is None:
         return None
-    if path.startswith("http://") or path.startswith("https://"):
-        return path
-    base = str(request.base_url).rstrip("/")
-    return f"{base}{path if path.startswith('/') else '/' + path}"
+    doc = await db.playlists.find_one({"slug": slug})
+    if not doc:
+        return None
+    repo = TrackRepository(db)
+    tracks: list[TrackOut] = []
+    for tid in doc.get("track_ids") or []:
+        hit = await repo.get_by_id(str(tid))
+        if not hit or not (hit.get("playback") or {}).get("available"):
+            continue
+        tracks.append(_track_out(mongo_track_to_track_out(hit, request)))
+    part_note = ""
+    parts = doc.get("parts") or {}
+    if parts:
+        part_note = f" ({len(parts)} part{'s' if len(parts) != 1 else ''} imported)"
+    return PlaylistOut(
+        id=slug,
+        title=(doc.get("title") or title) + part_note,
+        description=doc.get("description") or description,
+        track_count=len(tracks),
+        tracks=tracks,
+    )
+
+
+@router.get("/playlists/liked-music", response_model=PlaylistOut)
+async def playlist_liked_music(request: Request):
+    ensure_demo_audio()
+    out = await _playlist_from_mongo(
+        request,
+        slug=LIKED_SLUG,
+        title=LIKED_TITLE,
+        description=LIKED_DESC,
+    )
+    if out:
+        return out
+    raise HTTPException(
+        status_code=404,
+        detail="Liked Music playlist not imported yet. Run: python scripts/import_liked_music.py",
+    )
+
+
+@router.get("/playlists/major-afrobeats", response_model=PlaylistOut)
+async def playlist_major_afrobeats(request: Request):
+    """Curated star Afrobeats playlist (featured artist catalog)."""
+    ensure_demo_audio()
+    db = get_catalog_db()
+    if db is None:
+        rows = await catalog.genre_tracks("afrobeats", public_only=True)
+        tracks = [_track_out(r) for r in rows[:40] if r.get("playable", True)]
+        return PlaylistOut(
+            id="major-afrobeats",
+            title="Major Afrobeats",
+            description="Davido, Burna Boy, Wizkid, Asake, Rema, Odumodublvck, and more.",
+            track_count=len(tracks),
+            tracks=tracks,
+        )
+    repo = TrackRepository(db)
+    docs = await repo.featured_tracks(limit=80, genre="afrobeats")
+    tracks = [_track_out(mongo_track_to_track_out(d, request)) for d in docs]
+    return PlaylistOut(
+        id="major-afrobeats",
+        title="Major Afrobeats",
+        description="Star artists — playable from your GreenTube catalog.",
+        track_count=len(tracks),
+        tracks=tracks,
+    )
+
+
+@router.get("/tracks", response_model=list[TrackOut])
+async def list_tracks(
+    request: Request,
+    limit: int = Query(default=50, le=200),
+    skip: int = Query(default=0, ge=0),
+    genre: Optional[str] = None,
+    playable_only: bool = Query(default=True),
+):
+    ensure_demo_audio()
+    rows = await catalog.list_tracks(
+        limit=limit,
+        skip=skip,
+        playable_only=playable_only,
+        genre=genre,
+        request=request,
+    )
+    out = [_track_out(r) for r in rows]
+    if playable_only:
+        out = [t for t in out if t.playable]
+    return out
+
+
+@router.get("/trending", response_model=list[TrackOut])
+async def trending(request: Request, limit: int = Query(default=20, le=100)):
+    ensure_demo_audio()
+    db = get_catalog_db()
+    if db is not None:
+        repo = TrackRepository(db)
+        docs = await repo.trending(limit=limit)
+        if docs:
+            return [
+                _track_out(mongo_track_to_track_out(d, request))
+                for d in docs
+                if (d.get("playback") or {}).get("available")
+            ]
+    rows = await catalog.list_tracks(limit=limit, request=request)
+    return [_track_out(r) for r in rows if r.get("playable", True)]
+
+
+@router.get("/new-releases", response_model=list[TrackOut])
+async def new_releases(request: Request, limit: int = Query(default=20, le=100)):
+    ensure_demo_audio()
+    db = get_catalog_db()
+    if db is not None:
+        repo = TrackRepository(db)
+        docs = await repo.new_releases(limit=limit)
+        if docs:
+            return [
+                _track_out(mongo_track_to_track_out(d, request))
+                for d in docs
+                if (d.get("playback") or {}).get("available")
+            ]
+    rows = await catalog.list_tracks(limit=limit, request=request)
+    return [_track_out(r) for r in rows if r.get("playable", True)]
 
 
 @router.get("/home", response_model=HomeResponse)
-async def home_feed():
+async def home_feed(request: Request):
     ensure_demo_audio()
+    db = get_catalog_db()
+    if db is not None:
+        repo = TrackRepository(db)
+        featured_docs = await repo.featured_tracks(limit=24)
+        if len(featured_docs) >= 8:
+            rows = [mongo_track_to_track_out(d, request) for d in featured_docs]
+        else:
+            trending = await repo.trending(limit=24)
+            rows = [mongo_track_to_track_out(d, request) for d in featured_docs + trending][:24]
+    else:
+        rows = await catalog.list_tracks(limit=24, playable_only=True, request=request)
     items = [
         HomeItem(
-            id=t.id,
-            title=t.title,
-            artist=t.artist,
-            album=t.album,
-            duration_ms=t.duration_ms,
+            id=r["id"],
+            title=r["title"],
+            artist=r["artist"],
+            album=r.get("album"),
+            duration_ms=r["duration_ms"],
         )
-        for t in SEED_TRACKS
+        for r in rows
+        if r.get("playable", True)
     ]
+
+    genre_sections: list[HomeSection] = []
+    for slug, title in [
+        ("afrobeats", "Afrobeats essentials"),
+        ("hip-hop", "Hip-Hop flow"),
+        ("jazz", "Jazz & blues"),
+        ("electronic", "Electronic energy"),
+        ("chill", "Chill & unwind"),
+    ]:
+        genre_rows = await catalog.genre_tracks(slug, public_only=True)
+        playable = [r for r in genre_rows if r.get("playable", True)][:12]
+        if playable:
+            genre_sections.append(
+                HomeSection(
+                    id=f"genre_{slug}",
+                    title=title,
+                    items=[
+                        HomeItem(
+                            id=r["id"],
+                            title=r["title"],
+                            artist=r["artist"],
+                            album=r.get("album"),
+                            duration_ms=r["duration_ms"],
+                        )
+                        for r in playable
+                    ],
+                )
+            )
+
+    featured_items: list[HomeItem] = []
+    if db is not None:
+        featured_docs = await TrackRepository(db).featured_tracks(limit=16, genre="afrobeats")
+        featured_items = [
+            HomeItem(
+                id=track_id_str(d),
+                title=d.get("title") or "",
+                artist=(d.get("artist") or {}).get("name") or "",
+                album=(d.get("album") or {}).get("title"),
+                duration_ms=int((d.get("duration_seconds") or 0) * 1000),
+            )
+            for d in featured_docs
+        ]
+
     return HomeResponse(
         sections=[
-            HomeSection(id="quick_picks", title="Quick picks", items=items),
-            HomeSection(
-                id="listen_again",
-                title="Listen again",
-                items=list(reversed(items)),
+            *(
+                [
+                    HomeSection(
+                        id="featured_stars",
+                        title="Major artists — Afrobeats",
+                        items=featured_items,
+                    )
+                ]
+                if featured_items
+                else []
             ),
-            HomeSection(id="made_for_you", title="Made for you", items=items[:3]),
+            HomeSection(id="quick_picks", title="Quick picks", items=items),
+            *genre_sections,
+            HomeSection(id="listen_again", title="Listen again", items=list(reversed(items))),
+            HomeSection(id="made_for_you", title="Made for you", items=items[:4]),
         ],
-        source="seed-open-audio",
+        source=catalog.source,
     )
 
 
 @router.get("/search", response_model=SearchResponse)
 async def search(q: str = Query(min_length=1), limit: int = Query(default=20, le=50)):
     ensure_demo_audio()
-    q_lower = q.lower()
-    seed_hits = [
-        _seed_track_out(t)
-        for t in SEED_TRACKS
-        if q_lower in t.title.lower()
-        or q_lower in t.artist.lower()
-        or q_lower in t.album.lower()
-    ][:limit]
-
-    db = await try_db()
-    if db is not None:
-        try:
-            pattern = f"%{q}%"
-            tracks = (
-                await db.scalars(
-                    select(Track)
-                    .options(selectinload(Track.providers))
-                    .where(Track.title.ilike(pattern))
-                    .limit(limit)
-                )
-            ).all()
-            artists = (
-                await db.scalars(
-                    select(Artist).where(Artist.name.ilike(pattern)).limit(limit)
-                )
-            ).all()
-            albums = (
-                await db.scalars(
-                    select(Album).where(Album.title.ilike(pattern)).limit(limit)
-                )
-            ).all()
-            if tracks or artists or albums:
-                return SearchResponse(
-                    tracks=[
-                        TrackOut(
-                            id=t.id,
-                            title=t.title,
-                            duration_ms=t.duration_ms,
-                            artwork_url=t.artwork_url,
-                            isrc=t.isrc,
-                            genres=t.genres,
-                            providers=[p.provider for p in t.providers],
-                        )
-                        for t in tracks
-                    ]
-                    or seed_hits,
-                    artists=[
-                        {"id": a.id, "name": a.name, "image_url": a.image_url}
-                        for a in artists
-                    ],
-                    albums=[
-                        {"id": a.id, "title": a.title, "artwork_url": a.artwork_url}
-                        for a in albums
-                    ],
-                )
-        except Exception:
-            pass
-        finally:
-            await db.close()
-
-    artists = sorted({t.artist for t in SEED_TRACKS if q_lower in t.artist.lower()})
-    albums = sorted({t.album for t in SEED_TRACKS if q_lower in t.album.lower()})
+    result = await catalog.search(q, limit=limit)
+    tracks = [_track_out(t) for t in result["tracks"] if t.get("playable", True)]
     return SearchResponse(
-        tracks=seed_hits,
-        artists=[{"id": a, "name": a, "image_url": None} for a in artists],
-        albums=[{"id": a, "title": a, "artwork_url": None} for a in albums],
+        tracks=tracks,
+        artists=result["artists"],
+        albums=result["albums"],
+        genres=result.get("genres") or [],
+        source=catalog.source,
     )
 
 
-@router.get("/tracks/{track_id}", response_model=TrackOut)
-async def get_track(track_id: str):
-    seed = track_by_id(track_id)
-    if seed:
-        return _seed_track_out(seed)
-
-    db = await try_db()
+@router.get("/artists")
+async def list_artists(limit: int = Query(default=50, le=200), skip: int = Query(default=0, ge=0)):
+    db = get_catalog_db()
     if db is not None:
-        try:
-            track = await db.scalar(
-                select(Track)
-                .options(selectinload(Track.providers))
-                .where(Track.id == track_id)
-            )
-            if track:
-                return TrackOut(
-                    id=track.id,
-                    title=track.title,
-                    duration_ms=track.duration_ms,
-                    artwork_url=track.artwork_url,
-                    isrc=track.isrc,
-                    genres=track.genres,
-                    providers=[p.provider for p in track.providers],
-                )
-        except Exception:
-            pass
-        finally:
-            await db.close()
+        repo = ArtistRepository(db)
+        rows = await repo.list_artists(limit=limit, skip=skip)
+        return {
+            "artists": [
+                {
+                    "id": str(a["_id"]),
+                    "name": a.get("name"),
+                    "image_url": a.get("image_url"),
+                    "genres": a.get("genres") or [],
+                }
+                for a in rows
+            ],
+            "source": "mongodb",
+        }
+    from app.catalog_seed import SEED_TRACKS
 
-    raise HTTPException(status_code=404, detail="Track not found")
+    names = sorted({t.artist for t in SEED_TRACKS})
+    return {
+        "artists": [{"id": n, "name": n, "image_url": None, "genres": []} for n in names[skip : skip + limit]],
+        "source": "seed-open-audio",
+    }
+
+
+@router.get("/artists/{artist_id}")
+async def get_artist(artist_id: str):
+    db = get_catalog_db()
+    if db is not None:
+        repo = ArtistRepository(db)
+        doc = await repo.get_by_id(artist_id)
+        if doc:
+            return {
+                "id": str(doc["_id"]),
+                "name": doc.get("name"),
+                "bio": doc.get("bio"),
+                "image_url": doc.get("image_url"),
+                "genres": doc.get("genres") or [],
+                "country": doc.get("country"),
+                "musicbrainz_id": doc.get("musicbrainz_id"),
+                "source": "mongodb",
+            }
+    raise HTTPException(status_code=404, detail="Artist not found")
+
+
+@router.get("/albums")
+async def list_albums(limit: int = Query(default=50, le=200), skip: int = Query(default=0, ge=0)):
+    db = get_catalog_db()
+    if db is not None:
+        repo = AlbumRepository(db)
+        rows = await repo.list_albums(limit=limit, skip=skip)
+        return {
+            "albums": [
+                {
+                    "id": str(a["_id"]),
+                    "title": a.get("title"),
+                    "artist_id": str(a.get("artist_id")) if a.get("artist_id") else None,
+                    "artwork_url": a.get("artwork_url"),
+                    "release_date": a.get("release_date"),
+                    "genres": a.get("genres") or [],
+                }
+                for a in rows
+            ],
+            "source": "mongodb",
+        }
+    from app.catalog_seed import SEED_TRACKS
+
+    albums = sorted({t.album for t in SEED_TRACKS})
+    return {
+        "albums": [
+            {"id": a, "title": a, "artist_id": None, "artwork_url": None, "release_date": None, "genres": []}
+            for a in albums[skip : skip + limit]
+        ],
+        "source": "seed-open-audio",
+    }
+
+
+@router.get("/albums/{album_id}")
+async def get_album(album_id: str):
+    db = get_catalog_db()
+    if db is not None:
+        repo = AlbumRepository(db)
+        doc = await repo.get_by_id(album_id)
+        if doc:
+            return {
+                "id": str(doc["_id"]),
+                "title": doc.get("title"),
+                "artist_id": str(doc.get("artist_id")) if doc.get("artist_id") else None,
+                "artwork_url": doc.get("artwork_url"),
+                "release_date": doc.get("release_date"),
+                "genres": doc.get("genres") or [],
+                "track_count": doc.get("track_count") or 0,
+                "source": "mongodb",
+            }
+    raise HTTPException(status_code=404, detail="Album not found")
+
+
+@router.get("/tracks/{track_id}", response_model=TrackOut)
+async def get_track(track_id: str, request: Request):
+    ensure_demo_audio()
+    row = await catalog.get_track(track_id, request)
+    if not row:
+        raise HTTPException(status_code=404, detail="Track not found")
+    return _track_out(row)
+
+
+def _is_remote_url(url: str) -> bool:
+    try:
+        return urlparse(url).scheme in ("http", "https")
+    except Exception:
+        return False
+
+
+async def _proxy_audio(url: str) -> StreamingResponse:
+    """Stream remote MP3 through the API so <audio> stays same-origin (no CORS on Deezer/Audius)."""
+    client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=120.0), follow_redirects=True)
+    try:
+        req = client.build_request("GET", url)
+        upstream = await client.send(req, stream=True)
+        upstream.raise_for_status()
+    except Exception as exc:
+        await client.aclose()
+        raise HTTPException(status_code=502, detail=f"Upstream audio failed: {exc}") from exc
+
+    media_type = upstream.headers.get("content-type") or "audio/mpeg"
+
+    async def body():
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    return StreamingResponse(body(), media_type=media_type)
+
+
+async def _resolve_playback_url(track_id: str, request: Request) -> str | None:
+    from app.config import get_settings
+
+    settings = get_settings()
+    db = get_catalog_db()
+    if db is not None:
+        doc = await TrackRepository(db).get_by_id(track_id)
+        playback = (doc or {}).get("playback") or {}
+        if doc and playback.get("spotify_uri") and not playback.get("available"):
+            return None
+        if doc and playback.get("preview_only") and not settings.allow_preview_playback:
+            return None
+        if doc and (doc.get("source") or {}).get("provider") == "deezer" and not settings.allow_preview_playback:
+            return None
+        if doc and playback.get("available"):
+            url = await resolve_playback_stream(doc)
+            if url:
+                patch: dict = {
+                    "playback.stream_url": url,
+                    "playback.resolved_via": "playback_resolve",
+                }
+                if "dzcdn.net" in url or "deezer" in url:
+                    patch["playback.preview_only"] = True
+                else:
+                    patch["playback.preview_only"] = False
+                await db.tracks.update_one({"_id": doc["_id"]}, {"$set": patch})
+                return url
+    row = await catalog.get_track(track_id, request)
+    if row and row.get("playable") and row.get("stream_url"):
+        return row["stream_url"]
+    return None
+
+
+@router.get("/tracks/{track_id}/audio")
+async def stream_audio_redirect(track_id: str, request: Request):
+    """Same-origin URL for <audio src> — proxies remote streams, redirects local static."""
+    ensure_demo_audio()
+    url = await _resolve_playback_url(track_id, request)
+    if url:
+        if _is_remote_url(url):
+            return await _proxy_audio(url)
+        from app.catalog.service import _absolute
+
+        return RedirectResponse(url=_absolute(request, url), status_code=302)
+    seed = seed_track_by_id(track_id)
+    if seed:
+        from app.catalog.service import _absolute
+
+        return RedirectResponse(url=_absolute(request, seed.stream_path), status_code=302)
+    raise HTTPException(status_code=404, detail="No playable stream for this track")
 
 
 @router.get("/tracks/{track_id}/stream", response_model=StreamResponse)
 async def resolve_stream(track_id: str, request: Request):
-    """Resolve playback via provider map / open seed audio — never scrapes commercial streams."""
     ensure_demo_audio()
-    seed = track_by_id(track_id)
+    row = await catalog.get_track(track_id, request)
+    if row and row.get("playable") and row.get("stream_url"):
+        provider = (row.get("providers") or ["local"])[0]
+        return StreamResponse(
+            track_id=track_id,
+            provider=provider,
+            playback_type="stream",
+            url=row["stream_url"],
+            message="Resolved via catalog playback adapter",
+        )
+
+    seed = seed_track_by_id(track_id)
     if seed:
+        from app.catalog.service import _absolute
+
         return StreamResponse(
             track_id=track_id,
             provider=seed.provider,
@@ -225,32 +591,6 @@ async def resolve_stream(track_id: str, request: Request):
             url=_absolute(request, seed.stream_path),
             message="Resolved via open/demo provider adapter",
         )
-
-    db = await try_db()
-    if db is not None:
-        try:
-            providers = (
-                await db.scalars(
-                    select(TrackProvider).where(
-                        TrackProvider.track_id == track_id,
-                        TrackProvider.availability == "available",
-                    )
-                )
-            ).all()
-            if providers:
-                priority = {"user_owned": 0, "open": 1}
-                chosen = sorted(providers, key=lambda p: priority.get(p.provider, 50))[0]
-                return StreamResponse(
-                    track_id=track_id,
-                    provider=chosen.provider,
-                    playback_type=chosen.playback_type,
-                    url=_absolute(request, chosen.stream_url),
-                    message="Resolved via provider adapter",
-                )
-        except Exception:
-            pass
-        finally:
-            await db.close()
 
     raise HTTPException(
         status_code=404,

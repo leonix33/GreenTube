@@ -2,9 +2,13 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-echo "==> Postgres + Redis (optional but recommended)"
-cd "$ROOT/infra"
-docker compose up -d || echo "Docker compose skipped/failed — seed catalog still works without DB"
+if [[ "${SKIP_DOCKER:-}" == "1" ]] || ! command -v docker >/dev/null 2>&1; then
+  echo "==> Postgres + Redis skipped (set SKIP_DOCKER=0 and install Docker Desktop to enable)"
+else
+  echo "==> Postgres + Redis (optional — catalog works with MongoDB only)"
+  cd "$ROOT/infra"
+  docker compose up -d 2>/dev/null || echo "Docker compose skipped/failed — OK for MongoDB catalog + playback"
+fi
 
 echo "==> API venv + deps"
 cd "$ROOT/services/api"
@@ -24,5 +28,17 @@ if docker compose -f "$ROOT/infra/docker-compose.yml" ps --status running 2>/dev
   PYTHONPATH=. python scripts/seed_catalog.py || echo "DB seed skipped"
 fi
 
-echo "==> Starting API on :8000"
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+API_PORT="${API_PORT:-8000}"
+if curl -sf "http://127.0.0.1:${API_PORT}/health" >/dev/null 2>&1; then
+  echo "==> API already running on :${API_PORT} ($(curl -sf "http://127.0.0.1:${API_PORT}/health" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("catalog_source","?"), "mongodb="+str(d.get("mongodb",{}).get("connected")))' 2>/dev/null || echo ok))"
+  echo "    Health: http://localhost:${API_PORT}/health"
+  echo "    No need to start again — use ./scripts/dev-web.sh and open http://localhost:3000"
+  exit 0
+fi
+if lsof -nP -iTCP:"${API_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "ERROR: Port ${API_PORT} is in use but /health did not respond. Free the port or set API_PORT=8001"
+  exit 1
+fi
+
+echo "==> Starting API on :${API_PORT}"
+uvicorn app.main:app --reload --host 0.0.0.0 --port "${API_PORT}"

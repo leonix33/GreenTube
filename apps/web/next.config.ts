@@ -6,6 +6,8 @@ const nextConfig: NextConfig = {
     remotePatterns: [
       { protocol: "https", hostname: "coverartarchive.org" },
       { protocol: "https", hostname: "**.archive.org" },
+      { protocol: "https", hostname: "**.audius.co" },
+      { protocol: "https", hostname: "**.jamendo.com" },
     ],
   },
 };

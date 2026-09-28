@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import clsx from "clsx";
@@ -18,13 +19,15 @@ export function Sidebar() {
 
   return (
     <aside className="flex w-56 shrink-0 flex-col gap-6 border-r border-gt-border bg-black/40 px-4 py-5 backdrop-blur-md">
-      <Link href="/" className="group flex items-center gap-2 px-2">
-        <span className="flex h-8 w-8 items-center justify-center rounded-md bg-gt-green text-sm font-bold text-black">
-          GT
-        </span>
-        <span className="font-display text-xl tracking-tight text-white group-hover:text-gt-green">
-          GreenTube
-        </span>
+      <Link href="/" className="group block px-1 transition-opacity hover:opacity-90">
+        <Image
+          src="/logo.jpg"
+          alt="GreenTube — Music for a Greener Vibe"
+          width={1024}
+          height={1018}
+          priority
+          className="h-auto w-full max-w-[11.5rem] object-contain"
+        />
       </Link>
 
       <nav className="flex flex-1 flex-col gap-1">

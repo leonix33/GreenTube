@@ -44,7 +44,32 @@ DATABASE_URL=postgresql+asyncpg://greentube:greentube@localhost:5432/greentube \
   PYTHONPATH=. python scripts/seed_catalog.py
 ```
 
-Catalog/search/stream still work **without** Postgres using the built-in open seed catalog.
+Catalog/search/stream still work **without** MongoDB using the built-in open seed catalog fallback.
+
+### MongoDB catalog (primary)
+
+Set `MONGODB_URI` and `MONGODB_DATABASE=greentube` in `services/api/.env`. On startup the API connects to Atlas, creates indexes, and auto-seeds local demo tracks (`AUTO_SEED_MONGO=true`).
+
+See [docs/CATALOG_ARCHITECTURE.md](docs/CATALOG_ARCHITECTURE.md) for providers, ingestion, and admin imports.
+
+### Full playback via Spotify (Premium)
+
+For your **Liked** playlist (and any track with a linked `spotify_uri`), GreenTube can play **full-length** audio through Spotify’s Web Playback SDK (no stream ripping).
+
+1. Create an app at [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
+2. Add redirect URI: `http://localhost:8000/api/integrations/spotify/callback`
+3. In `services/api/.env`:
+
+   ```bash
+   SPOTIFY_CLIENT_ID=...
+   SPOTIFY_CLIENT_SECRET=...
+   SPOTIFY_REDIRECT_URI=http://localhost:8000/api/integrations/spotify/callback
+   FRONTEND_URL=http://localhost:3000
+   ```
+
+4. Restart the API, open http://localhost:3000/liked → **Connect Spotify** → **Link Liked to Spotify**, then play any track (Spotify badge in the player).
+
+Requires a **Spotify Premium** account for Web Playback.
 
 ## Implementation order
 
