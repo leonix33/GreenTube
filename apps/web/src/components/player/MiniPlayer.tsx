@@ -9,6 +9,7 @@ export function MiniPlayer() {
     isPlaying,
     positionMs,
     volume,
+    playbackSource,
     togglePlay,
     next,
     previous,
@@ -34,7 +35,18 @@ export function MiniPlayer() {
         </div>
         <div className="min-w-0">
           <p className="truncate text-sm font-medium text-white">{track.title}</p>
-          <p className="truncate text-xs text-gt-muted">{track.artist}</p>
+          <p className="truncate text-xs text-gt-muted">
+            {track.artist}
+            {playbackSource === "spotify" ? (
+              <span className="ml-2 rounded bg-[#1DB954]/20 px-1.5 py-0.5 text-[10px] text-[#1DB954]">
+                Spotify
+              </span>
+            ) : track.previewOnly ? (
+              <span className="ml-2 rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-amber-200/90">
+                30s preview
+              </span>
+            ) : null}
+          </p>
         </div>
       </div>
 

@@ -6,7 +6,11 @@ export type Track = {
   artworkUrl?: string;
   durationMs: number;
   streamUrl?: string;
+  previewOnly?: boolean;
+  spotifyUri?: string;
 };
+
+export type PlaybackSource = "stream" | "spotify";
 
 export type PlaybackState = {
   track: Track | null;
@@ -16,6 +20,7 @@ export type PlaybackState = {
   shuffle: boolean;
   repeat: "off" | "one" | "all";
   volume: number;
+  playbackSource: PlaybackSource;
 };
 
 export function formatTime(ms: number): string {
