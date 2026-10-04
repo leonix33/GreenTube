@@ -3,19 +3,10 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { apiGet } from "@/lib/api";
-import type { Track } from "@/lib/types";
 import { usePlayback } from "@/lib/playback";
 import { formatTime } from "@/lib/types";
-
-type ApiTrack = {
-  id: string;
-  title: string;
-  artist: string;
-  album?: string | null;
-  duration_ms: number;
-  preview_only?: boolean;
-  spotify_uri?: string | null;
-};
+import { apiTrackToTrack, type ApiTrack } from "@/lib/trackMapper";
+import type { Track } from "@/lib/types";
 
 type PlaylistResponse = {
   id: string;
@@ -24,18 +15,6 @@ type PlaylistResponse = {
   track_count: number;
   tracks: ApiTrack[];
 };
-
-function toTrack(t: ApiTrack): Track {
-  return {
-    id: t.id,
-    title: t.title,
-    artist: t.artist,
-    album: t.album ?? undefined,
-    durationMs: t.duration_ms,
-    previewOnly: t.preview_only,
-    spotifyUri: t.spotify_uri ?? undefined,
-  };
-}
 
 export function CuratedPlaylist({
   apiPath,
@@ -57,7 +36,7 @@ export function CuratedPlaylist({
       .then((data) => {
         if (cancelled) return;
         setPlaylist(data);
-        setTracks(data.tracks.map(toTrack));
+        setTracks(data.tracks.map(apiTrackToTrack));
       })
       .catch((err: Error) => {
         if (!cancelled) setError(err.message);

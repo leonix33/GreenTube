@@ -57,6 +57,24 @@ def mongo_track_to_track_out(doc: dict[str, Any], request: Request | None = None
     if preview_only and not has_spotify:
         duration_ms = min(duration_ms, 30_000) if duration_ms else 30_000
 
+    mv = playback.get("music_video") or {}
+    youtube_id = mv.get("youtube_video_id")
+    video_url = mv.get("video_url") or playback.get("video_url")
+    has_music_video = bool(youtube_id or video_url)
+    music_video: dict[str, Any] | None = None
+    if youtube_id:
+        music_video = {"kind": "youtube", "youtube_video_id": str(youtube_id)}
+    elif video_url:
+        music_video = {
+            "kind": "stream",
+            "video_url": _absolute(request, video_url),
+        }
+
+    track_id = track_id_str(doc)
+    if music_video and music_video["kind"] == "stream" and request is not None:
+        base = str(request.base_url).rstrip("/")
+        music_video["proxy_url"] = f"{base}/api/tracks/{track_id}/video"
+
     return {
         "id": track_id_str(doc),
         "title": doc.get("title") or "",
@@ -73,6 +91,8 @@ def mongo_track_to_track_out(doc: dict[str, Any], request: Request | None = None
         "stream_url": _absolute(request, stream_path)
         if (has_full_stream or has_preview_stream)
         else None,
+        "has_music_video": has_music_video,
+        "music_video": music_video,
     }
 
 
@@ -178,6 +198,14 @@ class CatalogService:
                 return [mongo_track_to_track_out(d, request) for d in docs]
         items = SEED_TRACKS if not genre else seed_tracks_for_genre(genre)
         return [seed_track_to_track_out(t, request) for t in items[skip : skip + limit]]
+
+    async def list_music_videos(
+        self, *, limit: int = 48, skip: int = 0, request: Request | None = None
+    ) -> list[dict[str, Any]]:
+        if self._tracks is not None:
+            docs = await self._tracks.list_music_videos(limit=limit, skip=skip)
+            return [mongo_track_to_track_out(d, request) for d in docs]
+        return []
 
     async def search(self, q: str, *, limit: int = 20) -> dict[str, Any]:
         if self._search is not None:

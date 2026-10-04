@@ -21,6 +21,13 @@ router = APIRouter(tags=["catalog"])
 catalog = CatalogService()
 
 
+class MusicVideoOut(BaseModel):
+    kind: str
+    youtube_video_id: Optional[str] = None
+    video_url: Optional[str] = None
+    proxy_url: Optional[str] = None
+
+
 class TrackOut(BaseModel):
     id: str
     title: str
@@ -34,6 +41,8 @@ class TrackOut(BaseModel):
     playable: bool = True
     preview_only: bool = False
     spotify_uri: Optional[str] = None
+    has_music_video: bool = False
+    music_video: Optional[MusicVideoOut] = None
 
 
 class HomeItem(BaseModel):
@@ -103,7 +112,14 @@ def _track_out(data: dict) -> TrackOut:
         playable=bool(data.get("playable", True)),
         preview_only=bool(data.get("preview_only", False)),
         spotify_uri=data.get("spotify_uri"),
+        has_music_video=bool(data.get("has_music_video")),
+        music_video=MusicVideoOut(**data["music_video"]) if data.get("music_video") else None,
     )
+
+
+class MusicVideosResponse(BaseModel):
+    tracks: list[TrackOut]
+    source: str
 
 
 @router.get("/genres", response_model=GenreListResponse)
@@ -474,6 +490,20 @@ async def get_album(album_id: str):
     raise HTTPException(status_code=404, detail="Album not found")
 
 
+@router.get("/music-videos", response_model=MusicVideosResponse)
+async def list_music_videos(
+    request: Request,
+    limit: int = Query(default=48, ge=1, le=200),
+    skip: int = Query(default=0, ge=0),
+):
+    ensure_demo_audio()
+    rows = await catalog.list_music_videos(limit=limit, skip=skip, request=request)
+    return MusicVideosResponse(
+        tracks=[_track_out(r) for r in rows],
+        source=catalog.source,
+    )
+
+
 @router.get("/tracks/{track_id}", response_model=TrackOut)
 async def get_track(track_id: str, request: Request):
     ensure_demo_audio()
@@ -564,6 +594,38 @@ async def stream_audio_redirect(track_id: str, request: Request):
 
         return RedirectResponse(url=_absolute(request, seed.stream_path), status_code=302)
     raise HTTPException(status_code=404, detail="No playable stream for this track")
+
+
+async def _resolve_video_url(track_id: str, request: Request) -> str | None:
+    db = get_catalog_db()
+    if db is None:
+        row = await catalog.get_track(track_id, request)
+        mv = (row or {}).get("music_video") or {}
+        if mv.get("kind") == "stream":
+            return mv.get("video_url") or mv.get("proxy_url")
+        return None
+    doc = await TrackRepository(db).get_by_id(track_id)
+    if not doc:
+        return None
+    playback = doc.get("playback") or {}
+    mv = playback.get("music_video") or {}
+    url = mv.get("video_url") or playback.get("video_url")
+    if url:
+        return url.strip() or None
+    return None
+
+
+@router.get("/tracks/{track_id}/video")
+async def stream_video(track_id: str, request: Request):
+    """Same-origin video stream for catalog tracks with `playback.music_video.video_url`."""
+    url = await _resolve_video_url(track_id, request)
+    if not url:
+        raise HTTPException(status_code=404, detail="No music video for this track")
+    if _is_remote_url(url):
+        return await _proxy_audio(url)
+    from app.catalog.service import _absolute
+
+    return RedirectResponse(url=_absolute(request, url), status_code=302)
 
 
 @router.get("/tracks/{track_id}/stream", response_model=StreamResponse)

@@ -31,6 +31,9 @@ type PlaybackContextValue = PlaybackState & {
   seek: (ms: number) => void;
   toggleShuffle: () => void;
   cycleRepeat: () => void;
+  openMusicVideo: () => void;
+  closeMusicVideo: () => void;
+  registerVideoElement: (el: HTMLVideoElement | null) => void;
   playbackError: string | null;
 };
 
@@ -63,6 +66,8 @@ function loadAndPlay(audio: HTMLAudioElement, url: string): Promise<void> {
 
 export function PlaybackProvider({ children }: { children: ReactNode }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const videoListenersCleanupRef = useRef<(() => void) | null>(null);
   const spotifyPollStopRef = useRef<(() => void) | null>(null);
   const spotifyConnectedRef = useRef(false);
   const queueRef = useRef<Track[]>([]);
@@ -78,6 +83,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     repeat: "off",
     volume: 0.8,
     playbackSource: "stream",
+    musicVideoOpen: false,
   });
 
   const stopSpotifyPoll = useCallback(() => {
@@ -126,9 +132,13 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const refreshSpotify = () => {
-      void spotifyStatus().then((s) => {
-        spotifyConnectedRef.current = s.connected;
-      });
+      void spotifyStatus()
+        .then((s) => {
+          spotifyConnectedRef.current = s.connected;
+        })
+        .catch(() => {
+          spotifyConnectedRef.current = false;
+        });
     };
     refreshSpotify();
     window.addEventListener("focus", refreshSpotify);
@@ -214,6 +224,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (audioRef.current) audioRef.current.volume = state.volume;
+    if (videoRef.current) videoRef.current.volume = state.volume;
   }, [state.volume]);
 
   const playStream = useCallback(
@@ -235,14 +246,92 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     [stopSpotifyPoll],
   );
 
+  const registerVideoElement = useCallback((el: HTMLVideoElement | null) => {
+    videoListenersCleanupRef.current?.();
+    videoListenersCleanupRef.current = null;
+    videoRef.current = el;
+    if (!el) return;
+    const onTime = () => {
+      setState((s) =>
+        s.playbackSource === "video-stream"
+          ? { ...s, positionMs: Math.floor(el.currentTime * 1000) }
+          : s,
+      );
+    };
+    const onMeta = () => {
+      const durMs = Number.isFinite(el.duration) ? Math.floor(el.duration * 1000) : 0;
+      if (durMs <= 0) return;
+      setState((s) => {
+        if (!s.track || s.playbackSource !== "video-stream") return s;
+        return { ...s, track: { ...s.track, durationMs: durMs } };
+      });
+    };
+    const onEnded = () => {
+      setState((s) => {
+        if (s.playbackSource !== "video-stream") return s;
+        return { ...s, isPlaying: false, musicVideoOpen: false, playbackSource: "stream" };
+      });
+    };
+    el.addEventListener("timeupdate", onTime);
+    el.addEventListener("loadedmetadata", onMeta);
+    el.addEventListener("ended", onEnded);
+    videoListenersCleanupRef.current = () => {
+      el.removeEventListener("timeupdate", onTime);
+      el.removeEventListener("loadedmetadata", onMeta);
+      el.removeEventListener("ended", onEnded);
+    };
+  }, []);
+
+  const closeMusicVideo = useCallback(() => {
+    videoRef.current?.pause();
+    setState((s) => ({
+      ...s,
+      musicVideoOpen: false,
+      playbackSource: s.playbackSource === "youtube" || s.playbackSource === "video-stream" ? "stream" : s.playbackSource,
+      isPlaying: false,
+    }));
+  }, []);
+
+  const openMusicVideo = useCallback(() => {
+    const audio = audioRef.current;
+    if (audio) audio.pause();
+    stopSpotifyPoll();
+    void pauseSpotify().catch(() => {});
+    setState((s) => {
+      if (!s.track?.musicVideo) return s;
+      const kind = s.track.musicVideo.kind;
+      if (kind === "youtube") {
+        return {
+          ...s,
+          musicVideoOpen: true,
+          playbackSource: "youtube",
+          isPlaying: true,
+        };
+      }
+      return {
+        ...s,
+        musicVideoOpen: true,
+        playbackSource: "video-stream",
+        isPlaying: false,
+        positionMs: 0,
+      };
+    });
+  }, [stopSpotifyPoll]);
+
   const playTrack = useCallback(
     async (track: Track, queue?: Track[]) => {
       const audio = audioRef.current;
       if (!audio) return;
       const q = queue ?? queueRef.current;
       setPlaybackError(null);
+      closeMusicVideo();
 
-      const spotify = await spotifyStatus();
+      let spotify = { configured: false, connected: false };
+      try {
+        spotify = await spotifyStatus();
+      } catch {
+        /* API unreachable — audio-only playback */
+      }
       spotifyConnectedRef.current = spotify.connected;
 
       if (spotify.connected) {
@@ -299,7 +388,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         setState((s) => ({ ...s, isPlaying: false, playbackSource: "stream" }));
       }
     },
-    [playStream, startSpotifyPoll, stopSpotifyPoll],
+    [playStream, startSpotifyPoll, stopSpotifyPoll, closeMusicVideo],
   );
 
   useEffect(() => {
@@ -311,6 +400,26 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   const togglePlay = useCallback(() => {
     const audio = audioRef.current;
     if (!state.track) return;
+
+    if (state.playbackSource === "youtube") return;
+
+    if (state.playbackSource === "video-stream") {
+      const video = videoRef.current;
+      if (!video) return;
+      if (state.isPlaying) {
+        video.pause();
+        setState((s) => ({ ...s, isPlaying: false }));
+      } else {
+        void video
+          .play()
+          .then(() => {
+            setPlaybackError(null);
+            setState((s) => ({ ...s, isPlaying: true }));
+          })
+          .catch(() => setPlaybackError("Could not play video."));
+      }
+      return;
+    }
 
     if (state.playbackSource === "spotify") {
       if (state.isPlaying) {
@@ -386,6 +495,12 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         setState((s) => ({ ...s, positionMs: ms }));
         return;
       }
+      if (state.playbackSource === "video-stream") {
+        const video = videoRef.current;
+        if (video) video.currentTime = ms / 1000;
+        setState((s) => ({ ...s, positionMs: ms }));
+        return;
+      }
       const audio = audioRef.current;
       if (audio) audio.currentTime = ms / 1000;
       setState((s) => ({ ...s, positionMs: ms }));
@@ -416,6 +531,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       seek,
       toggleShuffle,
       cycleRepeat,
+      openMusicVideo,
+      closeMusicVideo,
+      registerVideoElement,
     }),
     [
       state,
@@ -428,6 +546,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       seek,
       toggleShuffle,
       cycleRepeat,
+      openMusicVideo,
+      closeMusicVideo,
+      registerVideoElement,
     ],
   );
 

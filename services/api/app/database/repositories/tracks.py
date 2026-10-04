@@ -154,6 +154,19 @@ class TrackRepository:
         cursor = self._col.find(query).sort("discovery.trending_score", -1).limit(limit)
         return await cursor.to_list(length=limit)
 
+    async def list_music_videos(self, *, limit: int = 48, skip: int = 0) -> list[dict[str, Any]]:
+        query = {
+            "$or": [
+                {"playback.music_video.youtube_video_id": {"$exists": True, "$ne": ""}},
+                {"playback.music_video.video_url": {"$exists": True, "$ne": ""}},
+                {"playback.video_url": {"$exists": True, "$ne": ""}},
+            ]
+        }
+        cursor = (
+            self._col.find(query).sort("discovery.trending_score", -1).skip(skip).limit(limit)
+        )
+        return await cursor.to_list(length=limit)
+
     async def trending(self, *, limit: int = 20) -> list[dict[str, Any]]:
         query = {"playback.available": True}
         cursor = self._col.find(query).sort("discovery.trending_score", -1).limit(limit)

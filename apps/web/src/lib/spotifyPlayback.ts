@@ -189,19 +189,27 @@ export function pollSpotifyPlayback(
 }
 
 export async function resolveSpotifyUri(title: string, artist: string): Promise<string | null> {
-  const params = new URLSearchParams({ title, artist });
-  const res = await fetch(`${API_BASE}/api/integrations/spotify/track-uri?${params}`, {
-    credentials: "include",
-  });
-  if (!res.ok) return null;
-  const data = (await res.json()) as { uri?: string };
-  return data.uri ?? null;
+  try {
+    const params = new URLSearchParams({ title, artist });
+    const res = await fetch(`${API_BASE}/api/integrations/spotify/track-uri?${params}`, {
+      credentials: "include",
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { uri?: string };
+    return data.uri ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export async function spotifyStatus(): Promise<{ configured: boolean; connected: boolean }> {
-  const res = await fetch(`${API_BASE}/api/integrations/spotify/status`, {
-    credentials: "include",
-  });
-  if (!res.ok) return { configured: false, connected: false };
-  return res.json() as Promise<{ configured: boolean; connected: boolean }>;
+  try {
+    const res = await fetch(`${API_BASE}/api/integrations/spotify/status`, {
+      credentials: "include",
+    });
+    if (!res.ok) return { configured: false, connected: false };
+    return res.json() as Promise<{ configured: boolean; connected: boolean }>;
+  } catch {
+    return { configured: false, connected: false };
+  }
 }

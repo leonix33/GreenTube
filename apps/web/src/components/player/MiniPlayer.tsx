@@ -19,6 +19,8 @@ export function MiniPlayer() {
     repeat,
     toggleShuffle,
     cycleRepeat,
+    openMusicVideo,
+    musicVideoOpen,
   } = usePlayback();
 
   if (!track) return null;
@@ -110,6 +112,20 @@ export function MiniPlayer() {
       </div>
 
       <div className="flex flex-1 items-center justify-end gap-2">
+        {track.hasMusicVideo || track.musicVideo ? (
+          <button
+            type="button"
+            onClick={openMusicVideo}
+            className={`rounded-full px-2 py-1 text-xs font-medium ${
+              musicVideoOpen
+                ? "bg-gt-green text-black"
+                : "border border-white/20 text-white hover:bg-white/10"
+            }`}
+            aria-label="Play music video"
+          >
+            Video
+          </button>
+        ) : null}
         <span className="text-xs text-gt-muted">Vol</span>
         <input
           type="range"

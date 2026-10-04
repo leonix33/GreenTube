@@ -1,3 +1,7 @@
+export type MusicVideo =
+  | { kind: "youtube"; youtubeVideoId: string }
+  | { kind: "stream"; videoUrl?: string; proxyUrl?: string };
+
 export type Track = {
   id: string;
   title: string;
@@ -8,9 +12,11 @@ export type Track = {
   streamUrl?: string;
   previewOnly?: boolean;
   spotifyUri?: string;
+  hasMusicVideo?: boolean;
+  musicVideo?: MusicVideo;
 };
 
-export type PlaybackSource = "stream" | "spotify";
+export type PlaybackSource = "stream" | "spotify" | "video-stream" | "youtube";
 
 export type PlaybackState = {
   track: Track | null;
@@ -21,6 +27,7 @@ export type PlaybackState = {
   repeat: "off" | "one" | "all";
   volume: number;
   playbackSource: PlaybackSource;
+  musicVideoOpen: boolean;
 };
 
 export function formatTime(ms: number): string {

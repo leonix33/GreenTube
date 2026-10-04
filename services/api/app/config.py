@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     spotify_client_id: str = ""
     spotify_client_secret: str = ""
     spotify_redirect_uri: str = "http://localhost:8000/api/integrations/spotify/callback"
+    # Optional — attach official YouTube music videos via Data API (embed playback only).
+    youtube_api_key: str = ""
 
 
 @lru_cache

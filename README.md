@@ -71,6 +71,16 @@ For your **Liked** playlist (and any track with a linked `spotify_uri`), GreenTu
 
 Requires a **Spotify Premium** account for Web Playback.
 
+### Music videos
+
+Tracks can expose `playback.music_video` (YouTube embed id or proxied MP4 URL). Browse **Videos** in the web app or use the **Video** button in the player.
+
+1. Optional: set `YOUTUBE_API_KEY` and run  
+   `POST /api/admin/catalog/music-videos/match-youtube` (with `X-Admin-Key`) to attach official videos to trending tracks.
+2. Or set manually: `PUT /api/admin/catalog/tracks/{id}/music-video` with `{ "youtube_video_id": "..." }`.
+
+Playback uses the **YouTube IFrame Player** or HTML5 `<video>` through `/api/tracks/{id}/video` — no unofficial stream ripping.
+
 ## Implementation order
 
 1. ~~Web shell + player UI~~  

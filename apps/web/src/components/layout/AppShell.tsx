@@ -3,6 +3,7 @@
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TopBar } from "@/components/layout/TopBar";
 import { MiniPlayer } from "@/components/player/MiniPlayer";
+import { MusicVideoStage } from "@/components/player/MusicVideoStage";
 import { PlaybackProvider } from "@/lib/playback";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -16,6 +17,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <main className="flex-1 overflow-y-auto px-6 py-6">{children}</main>
           </div>
         </div>
+        <MusicVideoStage />
         <MiniPlayer />
       </div>
     </PlaybackProvider>
